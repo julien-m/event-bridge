@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "codex-github-bridge",
+  "main": "relay/worker.ts",
+  "compatibility_date": "2026-10-23",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {"bindings": [{"name":"INBOX","class_name":"Inbox"}]},
+  "migrations": [{"tag":"v1","new_sqlite_classes":["Inbox"]}],
+  "observability": {"enabled": true},
+  "vars": {"MAX_BODY_BYTES":"1048576","MAX_PENDING":"10000"}
+}
