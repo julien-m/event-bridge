@@ -35,6 +35,7 @@ export function startDaemon(config: Config): () => void {
 	);
 	moduleTasks = new ModuleTasks(config, moduleStore, {
 		owners: (repo) => sessions.forRepo(repo).length,
+		refreshOwners: () => sessions.refresh(),
 		githubBusy: (repo) =>
 			dispatcher.running.has(repo) || store.hasBlocked(repo),
 		githubCount: () => dispatcher.running.size,

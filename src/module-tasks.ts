@@ -108,6 +108,7 @@ export class ModuleStore {
 }
 export interface TaskGuards {
 	owners: (repo: string) => number;
+	refreshOwners?: () => void;
 	githubBusy: (repo: string) => boolean;
 	githubCount: () => number;
 	checkoutBusy: (path: string) => Promise<boolean>;
@@ -231,6 +232,7 @@ export class ModuleTasks {
 								this.config.maxParallel
 						)
 							continue;
+						this.guards.refreshOwners?.();
 						if (repository && this.guards.owners(task.repo ?? "") > 0) {
 							this.store.set(
 								job.id,
@@ -348,6 +350,15 @@ export class ModuleTasks {
 					"Service stopped during external action; reconcile before retry",
 					job.resource,
 				);
-		for (const entry of this.running.values()) entry.cancel();
+		for (const entry of this.running.values()) {
+			entry.cancel();
+			// launchd shutdown exits immediately; do not leave descendants waiting for an in-process timer.
+			if (entry.child.pid)
+				try {
+					process.kill(-entry.child.pid, "SIGKILL");
+				} catch {
+					/* Process group already exited. */
+				}
+		}
 	}
 }
