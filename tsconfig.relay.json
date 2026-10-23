@@ -1,1 +1,14 @@
-{"compilerOptions":{"target":"ES2023","module":"ESNext","moduleResolution":"Bundler","strict":true,"noEmit":true,"skipLibCheck":true,"types":["@cloudflare/workers-types"]},"include":["relay/**/*.ts","src/events.ts"]}
+{
+	"compilerOptions": {
+		"target": "ES2023",
+		"module": "ESNext",
+		"moduleResolution": "Bundler",
+		"strict": true,
+		"noEmit": true,
+		"skipLibCheck": true,
+		"types": ["@cloudflare/workers-types"],
+		"esModuleInterop": true,
+		"forceConsistentCasingInFileNames": true
+	},
+	"include": ["relay/**/*.ts", "src/events.ts"]
+}

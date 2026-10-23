@@ -6,6 +6,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultConfigPath, loadConfig, readSecret } from "./config.ts";
 import { startDaemon } from "./daemon.ts";
+import { administerModules } from "./module-admin.ts";
+import { ModuleStore } from "./module-tasks.ts";
 import { Store } from "./store.ts";
 
 const args = process.argv.slice(2);
@@ -22,10 +24,24 @@ if (operation === "start") {
 			stop();
 			process.exit(0);
 		});
+} else if (["modules-get", "modules-put", "tasks-check"].includes(operation)) {
+	console.log(
+		JSON.stringify(
+			await administerModules(config, operation, args.slice(2)),
+			null,
+			2,
+		),
+	);
 } else if (operation === "status") {
 	const store = new Store(join(config.stateDir, "inbox.sqlite"));
 	try {
-		console.log(JSON.stringify({ jobs: store.list() }, null, 2));
+		console.log(
+			JSON.stringify(
+				{ jobs: store.list(), moduleJobs: new ModuleStore(store.db).list() },
+				null,
+				2,
+			),
+		);
 	} finally {
 		store.close();
 	}
@@ -37,10 +53,21 @@ if (operation === "start") {
 		);
 	const store = new Store(join(config.stateDir, "inbox.sqlite"));
 	try {
-		const job = store.list().find((job) => job.id === id);
+		const moduleStore = new ModuleStore(store.db);
+		const isModule = id.startsWith("module:");
+		const job = (isModule ? moduleStore.list() : store.list()).find(
+			(job) => job.id === id,
+		);
 		if (job?.state !== "blocked")
 			throw new Error("Only a reconciled blocked event can be retried");
-		store.set(id, "queued", "Explicitly retried after human reconciliation");
+		if (isModule)
+			moduleStore.set(
+				id,
+				"queued",
+				"Explicitly retried after human reconciliation",
+			);
+		else
+			store.set(id, "queued", "Explicitly retried after human reconciliation");
 	} finally {
 		store.close();
 	}
@@ -130,6 +157,6 @@ if (operation === "start") {
 	);
 } else {
 	console.log(
-		"Usage: node src/cli.ts <start|install|status|hooks|retry> [config-path] [webhook-secret-entry|event-id]",
+		"Usage: node src/cli.ts <start|install|status|hooks|retry|modules-get|modules-put|tasks-check> [config-path] [webhook-secret-entry|event-id]",
 	);
 }

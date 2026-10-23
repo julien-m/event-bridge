@@ -71,6 +71,14 @@ export class Store {
 				thread: row.thread,
 			}));
 	}
+	/** Query quarantine without materializing private job bodies. */
+	hasBlocked(repo: string): boolean {
+		return (
+			this.db
+				.prepare("SELECT 1 FROM jobs WHERE repo=? AND state='blocked' LIMIT 1")
+				.get(repo) !== undefined
+		);
+	}
 	close(): void {
 		this.db.close();
 	}

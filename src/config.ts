@@ -7,6 +7,8 @@ import { z } from "zod";
 import { repoName } from "./events.ts";
 
 export const configSchema = z.object({
+	tasksFile: z.string().min(1).optional(),
+	adminTokenEntry: z.string().min(1).optional(),
 	relayUrl: z
 		.string()
 		.url()

@@ -27,6 +27,8 @@ export class Dispatcher extends EventEmitter {
 	private store: Store;
 	private sessions: Sessions;
 	private actions: Actions;
+	private readonly externalBusy: (repo: string) => boolean;
+	private readonly externalCount: () => number;
 	private draining = false;
 	private wakeAgain = false;
 	private stopped = false;
@@ -39,8 +41,12 @@ export class Dispatcher extends EventEmitter {
 		store: Store,
 		sessions: Sessions,
 		actions?: Actions,
+		externalBusy: (repo: string) => boolean = () => false,
+		externalCount: () => number = () => 0,
 	) {
 		super();
+		this.externalBusy = externalBusy;
+		this.externalCount = externalCount;
 		this.config = config;
 		this.store = store;
 		this.sessions = sessions;
@@ -77,7 +83,8 @@ export class Dispatcher extends EventEmitter {
 				this.wakeAgain = false;
 				for (const job of this.store.list(["queued", "deferred"])) {
 					if (this.stopped) return;
-					if (this.running.has(job.repo)) continue;
+					if (this.running.has(job.repo) || this.externalBusy(job.repo))
+						continue;
 					if (
 						this.store.list(["blocked"]).some((old) => old.repo === job.repo)
 					) {
@@ -153,7 +160,11 @@ export class Dispatcher extends EventEmitter {
 						this.store.set(job.id, "deferred", "Execution disabled");
 						continue;
 					}
-					if (this.running.size >= this.config.maxParallel) continue;
+					if (
+						this.running.size + this.externalCount() >=
+						this.config.maxParallel
+					)
+						continue;
 					try {
 						const path = realpathSync(repository.path);
 						if (await this.actions.busy(path)) {
@@ -172,6 +183,7 @@ export class Dispatcher extends EventEmitter {
 						// Recheck after network I/O: a human session may have started while GitHub was queried.
 						if (
 							this.sessions.forRepo(job.repo).length ||
+							this.externalBusy(job.repo) ||
 							(await this.actions.busy(path))
 						) {
 							this.store.set(
@@ -182,6 +194,11 @@ export class Dispatcher extends EventEmitter {
 							continue;
 						}
 						if (this.stopped) return;
+						if (
+							this.running.size + this.externalCount() >=
+							this.config.maxParallel
+						)
+							continue;
 						this.store.set(
 							job.id,
 							"running",
@@ -203,6 +220,7 @@ export class Dispatcher extends EventEmitter {
 									this.sessions.refresh();
 									return (
 										!this.stopped &&
+										!this.externalBusy(job.repo) &&
 										!current?.cancelled &&
 										!this.sessions.forRepo(job.repo).length
 									);

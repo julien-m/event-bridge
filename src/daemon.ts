@@ -1,12 +1,15 @@
 /** Maintain push delivery, native filesystem subscriptions and a single local dispatcher. */
 import { type FSWatcher, mkdirSync, watch } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import WebSocket from "ws";
 import type { Config } from "./config.ts";
 import { readSecret } from "./config.ts";
 import { Dispatcher } from "./dispatcher.ts";
 import { signalSchema } from "./events.ts";
+import { command } from "./github.ts";
+import { ModuleStore, ModuleTasks } from "./module-tasks.ts";
+import { moduleEventSchema } from "./modules.ts";
 import { Sessions } from "./sessions.ts";
 import { Store } from "./store.ts";
 
@@ -19,7 +22,34 @@ export function startDaemon(config: Config): () => void {
 	const store = new Store(join(config.stateDir, "inbox.sqlite"));
 	store.recoverInterrupted();
 	const sessions = new Sessions(config);
-	const dispatcher = new Dispatcher(config, store, sessions);
+	const moduleStore = new ModuleStore(store.db);
+	moduleStore.recover();
+	let moduleTasks: ModuleTasks | undefined;
+	const dispatcher = new Dispatcher(
+		config,
+		store,
+		sessions,
+		undefined,
+		(repo) => moduleTasks?.busy(repo) ?? false,
+		() => moduleTasks?.running.size ?? 0,
+	);
+	moduleTasks = new ModuleTasks(config, moduleStore, {
+		owners: (repo) => sessions.forRepo(repo).length,
+		githubBusy: (repo) =>
+			dispatcher.running.has(repo) || store.hasBlocked(repo),
+		githubCount: () => dispatcher.running.size,
+		checkoutBusy: async (path) =>
+			(
+				await command(
+					"git",
+					["status", "--porcelain", "--untracked-files=normal"],
+					path,
+				)
+			).trim().length > 0,
+		released: () => dispatcher.wake(),
+		failed: (event) =>
+			console.error(JSON.stringify({ at: new Date().toISOString(), event })),
+	});
 	const log = (event: string, detail: unknown = {}) =>
 		console.log(
 			JSON.stringify({ at: new Date().toISOString(), event, detail }),
@@ -34,21 +64,29 @@ export function startDaemon(config: Config): () => void {
 	const wake = () => {
 		clearTimeout(debounce);
 		debounce = setTimeout(() => {
-			if (!unsafe) dispatcher.stopConflicts();
+			if (!unsafe) {
+				dispatcher.stopConflicts();
+				moduleTasks?.stopConflicts();
+			}
 		}, 250);
 	};
 	sessions.on("changed", wake);
 	sessions.on("unsafe", (error) => {
 		unsafe = true;
 		dispatcher.stop();
+		moduleTasks?.stop();
 		log("ownership_watch_failed", String(error));
 	});
 	dispatcher.on("error", (error) => {
 		unsafe = true;
 		dispatcher.stop();
+		moduleTasks?.stop();
 		log("dispatcher_failed", String(error));
 	});
-	dispatcher.on("outcome", (id) => log("job_outcome", { id }));
+	dispatcher.on("outcome", (id) => {
+		log("job_outcome", { id });
+		moduleTasks?.wake();
+	});
 	sessions.start();
 	for (const repository of config.repositories) {
 		const watcher = watch(
@@ -71,7 +109,19 @@ export function startDaemon(config: Config): () => void {
 		watcher.on("error", (error) => {
 			unsafe = true;
 			dispatcher.stop();
+			moduleTasks?.stop();
 			log("repository_watch_failed", String(error));
+		});
+		watchers.push(watcher);
+	}
+	if (config.tasksFile) {
+		const file = basename(config.tasksFile);
+		const watcher = watch(dirname(config.tasksFile), (_event, changed) => {
+			if (!changed || changed.toString() === file) wake();
+		});
+		watcher.on("error", () => {
+			moduleTasks?.stop();
+			log("tasks_watch_failed");
 		});
 		watchers.push(watcher);
 	}
@@ -90,11 +140,21 @@ export function startDaemon(config: Config): () => void {
 			failures = 0;
 			log("relay_connected");
 			dispatcher.wake();
+			moduleTasks?.wake();
 		});
 		socket.on("message", (bytes) => {
 			try {
 				const message = JSON.parse(bytes.toString());
+				if (!message || typeof message !== "object" || Array.isArray(message))
+					throw new Error("Invalid event envelope");
 				if (typeof message.acknowledged === "string") return;
+				if (message.kind === "module") {
+					const event = moduleEventSchema.parse(message);
+					const inserted = moduleStore.receive(event);
+					socket?.send(JSON.stringify({ ack: event.id }));
+					if (inserted && !unsafe) moduleTasks?.wake();
+					return;
+				}
 				const signal = signalSchema.parse(message);
 				if (!config.repositories.some((repo) => repo.repo === signal.repo))
 					throw new Error("Repository outside local allowlist");
@@ -120,6 +180,7 @@ export function startDaemon(config: Config): () => void {
 	};
 	connect();
 	dispatcher.wake();
+	moduleTasks.wake();
 	log("started", { repositories: config.repositories.length });
 	return () => {
 		stopping = true;
@@ -127,6 +188,7 @@ export function startDaemon(config: Config): () => void {
 		clearTimeout(debounce);
 		socket?.close();
 		dispatcher.stop();
+		moduleTasks?.stop();
 		sessions.close();
 		for (const watcher of watchers) watcher.close();
 		store.close();

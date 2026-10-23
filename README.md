@@ -41,9 +41,9 @@ node src/cli.ts install
 node src/cli.ts hooks
 ```
 
-The Cloudflare Worker is named `event-bridge`. GitHub is its first supported event source; the generic JSON module-registration API discussed for future sources is not implemented yet. Existing local paths and the launchd label retain their original names to preserve state.
+The Cloudflare Worker is named `event-bridge`. GitHub is a built-in event source. Additional webhook modules can be registered from the Mac using JSON policy, HMAC verification and input mapping without redeployment. Read [the module guide](docs/modules.md) for administration, local task registration and edge prerequisites. Existing private state paths and the launchd label retain their original names to preserve state.
 
-Before installing hooks, attach the dedicated hostname to the Worker and configure hostname-scoped edge rules. Public `workers.dev` and preview routes are disabled in the deployment configuration, and Worker CPU time is limited to 50 ms per invocation. Setup requires the dedicated HTTPS URL on first use and preserves it on subsequent runs.
+Before installing hooks, attach the dedicated hostname to the Worker and configure hostname-scoped edge rules. Generic ingress requires its separate custom header credential; module administration requires both transport and administration credentials. Public `workers.dev` and preview routes are disabled in the deployment configuration, and Worker CPU time is limited to 50 ms per invocation. Setup requires the dedicated HTTPS URL on first use and preserves it on subsequent runs.
 
 Setup discovers only direct Git checkouts owned by the authenticated GitHub account and resolves canonical GitHub names, excludes archived/disabled repositories, and deduplicates remotes. Inspect the generated repository allowlist **before** installing hooks. New repositories are not enrolled silently: rerun setup and hooks explicitly. Setup uses the existing `cloudflare/account/id` and `cloudflare/wrangler/api-key` Keychain entries; it creates bridge-specific webhook and client secrets without printing them. No local path, account identifier, token, event payload or execution report belongs in Git.
 
@@ -93,3 +93,5 @@ Apply WAF rules before Worker execution: allow only registered paths and methods
 Preserve other hostnames' existing security rules. Exempt only the relay hostname from a geographic restriction that would reject providers' webhooks. Do not enable browser challenges or zone-wide Bot Fight Mode for webhook traffic. Existing rate limits still apply and can affect provider bursts. Refresh provider network lists explicitly when needed; no periodic fetch is installed.
 
 During migration, prove the same Durable Object namespace remains attached before changing producers and the Mac URL. Disable every legacy public route only after signed provider deliveries and the authenticated WebSocket work through the protected hostname. A valid-looking signature header alone is never authentication.
+
+Development conventions are routed through `.conventions/index.md` after running `conventions-init`; generated local convention files remain outside Git. The repository includes TypeScript/Biome pre-commit checks, event-triggered CI and security scans, CodeQL, and dependency update configuration.

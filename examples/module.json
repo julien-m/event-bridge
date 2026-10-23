@@ -1,0 +1,21 @@
+{
+	"id": "example-source",
+	"version": 1,
+	"enabled": true,
+	"task": "example-task",
+	"signature": {
+		"algorithm": "SHA-256",
+		"header": "x-webhook-signature",
+		"encoding": "hex",
+		"prefix": "sha256=",
+		"parts": [{ "from": "raw-body" }]
+	},
+	"eventId": { "from": "body", "pointer": "/id" },
+	"filters": [
+		{
+			"source": { "from": "body", "pointer": "/type" },
+			"equals": "example.created"
+		}
+	],
+	"inputs": { "resourceId": { "from": "body", "pointer": "/data/id" } }
+}

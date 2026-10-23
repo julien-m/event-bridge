@@ -1,8 +1,9 @@
 /** Authenticated webhook inbox with durable delivery over an outbound Mac WebSocket. */
 import { DurableObject } from "cloudflare:workers";
 import { normalizeEvent, verifySignature } from "../src/events";
+import { type ModuleBindings, ModuleRegistry, matchesSecret } from "./modules";
 
-interface Bindings extends RelayEnv {
+interface Bindings extends RelayEnv, ModuleBindings {
 	WEBHOOK_SECRET: string;
 	CLIENT_TOKEN: string;
 	ALLOWED_REPOS: string;
@@ -10,8 +11,10 @@ interface Bindings extends RelayEnv {
 }
 
 export class Inbox extends DurableObject<Bindings> {
+	private modules: ModuleRegistry;
 	constructor(ctx: DurableObjectState, env: Bindings) {
 		super(ctx, env);
+		this.modules = new ModuleRegistry(ctx.storage, env);
 		ctx.storage.sql.exec(
 			"CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, body TEXT NOT NULL, acknowledged INTEGER NOT NULL DEFAULT 0)",
 		);
@@ -19,6 +22,21 @@ export class Inbox extends DurableObject<Bindings> {
 
 	async fetch(request: Request): Promise<Response> {
 		const path = new URL(request.url).pathname;
+		if (path.startsWith("/admin/"))
+			return this.modules.administer(request, Number(this.env.MAX_BODY_BYTES));
+		if (path.startsWith("/webhooks/")) {
+			const result = await this.modules.receive(
+				request,
+				Number(this.env.MAX_BODY_BYTES),
+			);
+			if (result instanceof Response) return result;
+			return this.fetch(
+				new Request("https://inbox/enqueue", {
+					method: "POST",
+					body: JSON.stringify(result.event),
+				}),
+			);
+		}
 		if (path === "/connect") {
 			if (request.headers.get("Upgrade") !== "websocket")
 				return new Response("WebSocket required", { status: 426 });
@@ -49,6 +67,12 @@ export class Inbox extends DurableObject<Bindings> {
 				"SELECT COUNT(*) AS count FROM events WHERE acknowledged=0",
 			)
 			.one().count;
+		if (
+			this.ctx.storage.sql
+				.exec("SELECT id FROM events WHERE id=?", signal.id)
+				.toArray().length
+		)
+			return Response.json({ accepted: true, duplicate: true });
 		if (pending >= Number(this.env.MAX_PENDING))
 			return new Response("Inbox full", { status: 503 });
 		this.ctx.storage.sql.exec(
@@ -114,7 +138,33 @@ export default {
 	async fetch(request: Request, env: Bindings): Promise<Response> {
 		const path = new URL(request.url).pathname;
 		const inbox = env.INBOX.getByName("installation");
+		if (path.startsWith("/admin/")) {
+			if (
+				!(await matchesSecret(
+					request.headers.get("Authorization"),
+					`Bearer ${env.CLIENT_TOKEN}`,
+				)) ||
+				!(await matchesSecret(
+					request.headers.get("X-Bridge-Admin"),
+					env.ADMIN_TOKEN,
+				))
+			)
+				return new Response("Unauthorized", { status: 401 });
+			return inbox.fetch(request);
+		}
+		if (path.startsWith("/webhooks/") && request.method === "POST") {
+			if (
+				!(await matchesSecret(
+					request.headers.get("X-Bridge-Ingress"),
+					env.INGRESS_TOKEN,
+				))
+			)
+				return new Response("Unauthorized", { status: 401 });
+			return inbox.fetch(request);
+		}
 		if (["/connect", "/status"].includes(path)) {
+			if (request.method !== "GET")
+				return new Response("Not found", { status: 404 });
 			const token = request.headers
 				.get("Authorization")
 				?.replace(/^Bearer /, "");

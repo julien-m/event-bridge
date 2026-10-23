@@ -5,6 +5,9 @@
 - Public endpoints require HMAC or bearer authentication; TLS validation remains enabled. No remote execution endpoint is exposed on the Mac.
 - Agent children must use ChatGPT authentication, isolated clones and dedicated branches. No automatic merge, deployment, secret rotation, permission change or weakening of tests is authorized.
 - A busy repository is routed to its live owner or deferred. Never resume a session in a competing process. Uncertain delivery or interrupted execution requires reconciliation.
-- State, logs and configuration are local and private. Do not post private repository metadata or reports in this public repository.
+- Module policy contains no executable code. Provider secrets are separately encrypted in the durable registry; list responses never disclose them. Every mapped header must be signed. Administration, transport and generic edge ingress use distinct credentials.
+- Generic task commands are authorized in the private local registry only. Webhook inputs travel as JSON on stdin, with shared repository ownership/concurrency guards and interruption quarantine.
+- Local task definitions and execution logs stay private on the Mac; explicitly mapped webhook inputs and encrypted provider credentials are persisted by the Cloudflare relay.
+- Machine configuration, local execution state and logs stay private. Do not post private repository metadata, provider payloads or reports in this public repository.
 
 Report suspected vulnerabilities privately through the repository owner's GitHub profile. Do not publish tokens or exploit private repositories.

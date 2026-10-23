@@ -117,6 +117,9 @@ if (deploy.status !== 0)
 const bindings = {
 	WEBHOOK_SECRET: webhookSecret,
 	CLIENT_TOKEN: clientToken,
+	ADMIN_TOKEN: secret("event-bridge/prod/admin-token", true),
+	MODULE_SECRET_KEY: secret("event-bridge/prod/module-secret-key", true),
+	INGRESS_TOKEN: secret("event-bridge/prod/ingress-token", true),
 	ALLOWED_REPOS: JSON.stringify(repositories.map((repo) => repo.repo)),
 	REVIEW_AUTHORS: JSON.stringify(reviewAuthors),
 };
@@ -143,6 +146,8 @@ if (existsSync(configPath))
 	});
 const config = configSchema.parse({
 	relayUrl,
+	adminTokenEntry: "event-bridge/prod/admin-token",
+	tasksFile: previous?.tasksFile,
 	clientTokenEntry: clientEntry,
 	credsBin,
 	ghBin,

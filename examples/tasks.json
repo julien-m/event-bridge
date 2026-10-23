@@ -1,0 +1,14 @@
+{
+	"version": 1,
+	"tasks": [
+		{
+			"id": "example-task",
+			"module": "example-source",
+			"executable": "/absolute/path/to/your-handler",
+			"args": [],
+			"cwd": "/absolute/path/to/working-directory",
+			"timeoutMs": 30000,
+			"enabled": true
+		}
+	]
+}
