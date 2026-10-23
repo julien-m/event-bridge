@@ -443,3 +443,99 @@ test("client renders true stopped health, filters groups, and labels stale data 
 		f.cleanup();
 	}
 });
+
+test("BFCache restoration resumes one SSE stream and freshness clock without trusting old data", {
+	timeout: 2000,
+}, () => {
+	const f = fixture();
+	const nodes = new Map<string, Element>();
+	const element = (id: string) => {
+		if (!nodes.has(id)) nodes.set(id, new Element());
+		return nodes.get(id) as Element;
+	};
+	const lifecycle = new Map<string, (event: { persisted: boolean }) => void>();
+	const timers = new Map<number, () => void>();
+	let timerSequence = 0;
+	let now = Date.now();
+	class Clock extends Date {
+		static now() {
+			return now;
+		}
+	}
+	class Source {
+		static instances: Source[] = [];
+		readonly listeners = new Map<string, (event: { data: string }) => void>();
+		closed = false;
+		onerror: () => void = () => {};
+		constructor() {
+			Source.instances.push(this);
+		}
+		addEventListener(
+			type: string,
+			callback: (event: { data: string }) => void,
+		) {
+			this.listeners.set(type, callback);
+		}
+		close() {
+			this.closed = true;
+		}
+		snapshot() {
+			this.listeners.get("snapshot")?.({
+				data: JSON.stringify(f.telemetry.snapshot()),
+			});
+		}
+	}
+	try {
+		element("severity").value = "all";
+		runInNewContext(
+			readFileSync(new URL("../src/panel-client.js", import.meta.url), "utf8"),
+			{
+				document: {
+					getElementById: element,
+					createElement: () => new Element(),
+				},
+				EventSource: Source,
+				window: {
+					addEventListener: (
+						type: string,
+						callback: (event: { persisted: boolean }) => void,
+					) => lifecycle.set(type, callback),
+				},
+				setInterval: (callback: () => void) => {
+					const id = ++timerSequence;
+					timers.set(id, callback);
+					return id;
+				},
+				clearInterval: (id: number) => timers.delete(id),
+				Date: Clock,
+			},
+		);
+		lifecycle.get("pageshow")?.({ persisted: false });
+		assert.equal(Source.instances.length, 1);
+		assert.equal(timers.size, 1);
+		Source.instances[0].snapshot();
+		assert.match(element("freshness").textContent, /Live local/);
+		lifecycle.get("pagehide")?.({ persisted: true });
+		assert.equal(Source.instances[0].closed, true);
+		assert.equal(timers.size, 0);
+		lifecycle.get("pageshow")?.({ persisted: true });
+		lifecycle.get("pageshow")?.({ persisted: true });
+		assert.equal(Source.instances.length, 2);
+		assert.equal(timers.size, 1);
+		assert.match(element("freshness").textContent, /not current/);
+		Source.instances[0].snapshot();
+		assert.match(element("freshness").textContent, /not current/);
+		Source.instances[1].snapshot();
+		assert.match(element("freshness").textContent, /Live local/);
+		Source.instances[0].onerror();
+		assert.match(element("freshness").textContent, /Live local/);
+		now += 60 * 60 * 1000;
+		for (const tick of timers.values()) tick();
+		assert.match(element("freshness").textContent, /not current/);
+		lifecycle.get("pagehide")?.({ persisted: false });
+		assert.equal(Source.instances[1].closed, true);
+		assert.equal(timers.size, 0);
+	} finally {
+		f.cleanup();
+	}
+});

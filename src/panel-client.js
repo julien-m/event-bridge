@@ -9,7 +9,8 @@
 	let snapshot;
 	let receivedAt = 0;
 	let connected = false;
-	const events = new EventSource("/events");
+	let events;
+	let clock;
 	const freshness = () => {
 		const fresh = connected && Date.now() - receivedAt < 45000;
 		put(
@@ -121,37 +122,56 @@
 			node("events").append(tr);
 		}
 	};
-	events.addEventListener("snapshot", (event) => {
-		snapshot = JSON.parse(event.data);
-		connected = true;
-		receivedAt = Date.now();
-		options(
-			"repo",
-			snapshot.events.map((e) => e.repo),
-		);
-		options(
-			"module",
-			snapshot.events.map((e) => e.module),
-		);
-		render();
-		freshness();
-	});
-	events.addEventListener("heartbeat", () => {
-		connected = true;
-		receivedAt = Date.now();
-		freshness();
-		render();
-	});
-	events.onerror = () => {
+	const connect = () => {
+		// pageshow also fires on initial load; this guard prevents duplicate streams and clocks.
+		if (events) return;
 		connected = false;
 		freshness();
+		const stream = new EventSource("/events");
+		events = stream;
+		stream.addEventListener("snapshot", (event) => {
+			if (events !== stream) return;
+			snapshot = JSON.parse(event.data);
+			connected = true;
+			receivedAt = Date.now();
+			options(
+				"repo",
+				snapshot.events.map((e) => e.repo),
+			);
+			options(
+				"module",
+				snapshot.events.map((e) => e.module),
+			);
+			render();
+			freshness();
+		});
+		stream.addEventListener("heartbeat", () => {
+			if (events !== stream) return;
+			connected = true;
+			receivedAt = Date.now();
+			freshness();
+			render();
+		});
+		stream.onerror = () => {
+			if (events !== stream) return;
+			connected = false;
+			freshness();
+		};
+		// A local display clock detects silence; it makes no HTTP requests.
+		clock = setInterval(freshness, 5000);
 	};
 	for (const id of ["severity", "module", "repo"])
 		node(id).addEventListener("change", render);
-	// A local display clock detects a suspended or dead process; it performs no HTTP requests.
-	const clock = setInterval(freshness, 5000);
 	window.addEventListener("pagehide", () => {
+		const stream = events;
+		events = undefined;
 		clearInterval(clock);
-		events.close();
+		clock = undefined;
+		connected = false;
+		stream?.close();
+		freshness();
 	});
+	// BFCache restores this script's existing state rather than executing it again.
+	window.addEventListener("pageshow", connect);
+	connect();
 })();
