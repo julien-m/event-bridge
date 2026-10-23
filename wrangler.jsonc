@@ -1,6 +1,9 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "codex-github-bridge",
+  "name": "event-bridge",
+  "workers_dev": false,
+  "preview_urls": false,
+  "limits": {"cpu_ms": 50},
   "main": "relay/worker.ts",
   "compatibility_date": "2026-10-23",
   "compatibility_flags": ["nodejs_compat"],

@@ -15,6 +15,19 @@ import { configSchema, defaultConfigPath } from "./config.ts";
 
 const projectsRoot = resolve(process.argv[2] ?? join(homedir(), "projects"));
 const configPath = resolve(process.argv[3] ?? defaultConfigPath);
+const previous = existsSync(configPath)
+	? configSchema.parse(JSON.parse(readFileSync(configPath, "utf8")))
+	: undefined;
+const relayUrl = process.argv[4] ?? previous?.relayUrl;
+if (
+	!relayUrl ||
+	new URL(relayUrl).protocol !== "https:" ||
+	new URL(relayUrl).hostname.endsWith(".workers.dev")
+) {
+	throw new Error(
+		"Provide a dedicated HTTPS relay URL after the projects root and config path; configure its custom domain and edge protection before installing hooks. Public workers.dev and preview routes stay disabled.",
+	);
+}
 const locate = (name: string) =>
 	execFileSync("/usr/bin/which", [name], { encoding: "utf8" }).trim();
 const credsBin = locate("creds"),
@@ -101,8 +114,6 @@ const deploy = spawnSync(wrangler, ["deploy"], {
 });
 if (deploy.status !== 0)
 	throw new Error(`Worker deploy failed: ${deploy.stderr}`);
-const relayUrl = deploy.stdout.match(/https:\/\/[^\s]+\.workers\.dev/)?.[0];
-if (!relayUrl) throw new Error("Deployment did not return a workers.dev URL");
 const bindings = {
 	WEBHOOK_SECRET: webhookSecret,
 	CLIENT_TOKEN: clientToken,

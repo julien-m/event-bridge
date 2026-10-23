@@ -1,4 +1,4 @@
-# Codex GitHub Bridge
+# Event Bridge
 
 An event-driven macOS companion that triages Codex review findings and failed GitHub Actions runs with your existing ChatGPT sign-in. It never scans GitHub on a timer and never needs an OpenAI API key.
 
@@ -36,10 +36,14 @@ Read [the security contract](SECURITY.md) before enabling automatic execution.
 npm ci
 npm run check
 npm test
-npm run setup -- /path/to/projects
+npm run setup -- /path/to/projects /path/to/config.json https://bridge.example.com
 node src/cli.ts install
 node src/cli.ts hooks
 ```
+
+The Cloudflare Worker is named `event-bridge`. GitHub is its first supported event source; the generic JSON module-registration API discussed for future sources is not implemented yet. Existing local paths and the launchd label retain their original names to preserve state.
+
+Before installing hooks, attach the dedicated hostname to the Worker and configure hostname-scoped edge rules. Public `workers.dev` and preview routes are disabled in the deployment configuration, and Worker CPU time is limited to 50 ms per invocation. Setup requires the dedicated HTTPS URL on first use and preserves it on subsequent runs.
 
 Setup discovers only direct Git checkouts owned by the authenticated GitHub account and resolves canonical GitHub names, excludes archived/disabled repositories, and deduplicates remotes. Inspect the generated repository allowlist **before** installing hooks. New repositories are not enrolled silently: rerun setup and hooks explicitly. Setup uses the existing `cloudflare/account/id` and `cloudflare/wrangler/api-key` Keychain entries; it creates bridge-specific webhook and client secrets without printing them. No local path, account identifier, token, event payload or execution report belongs in Git.
 
@@ -81,3 +85,11 @@ Preserve local reports until their outcomes are reconciled. Delete the Cloudflar
 - Read [GitHub webhook events](https://docs.github.com/en/webhooks/webhook-events-and-payloads) and [Cloudflare WebSocket hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/) for transport behavior.
 
 Blocked or interrupted actions quarantine the entire repository, including later events, until an operator checks that no previous repair process or external action remains. Only then use the explicit retry command with `--reconciled`. Fork pull requests are outside unattended execution scope. A final ownership and dirty-state check runs after clone preparation and immediately before Codex launch.
+
+## Edge protection
+
+Apply WAF rules before Worker execution: allow only registered paths and methods, restrict GitHub ingress to the current `hooks` networks from GitHub's `/meta` API, and require the exact client bearer token on local control paths. The runtime still verifies HMAC signatures and client authentication. Use normalized header-map keys instead of comparing original header-name casing. Keep any rendered rule containing a credential private; rotate the rule and client credential together.
+
+Preserve other hostnames' existing security rules. Exempt only the relay hostname from a geographic restriction that would reject providers' webhooks. Do not enable browser challenges or zone-wide Bot Fight Mode for webhook traffic. Existing rate limits still apply and can affect provider bursts. Refresh provider network lists explicitly when needed; no periodic fetch is installed.
+
+During migration, prove the same Durable Object namespace remains attached before changing producers and the Mac URL. Disable every legacy public route only after signed provider deliveries and the authenticated WebSocket work through the protected hostname. A valid-looking signature header alone is never authentication.
