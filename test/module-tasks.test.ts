@@ -113,3 +113,69 @@ test("registered argv receives JSON stdin, reloads local task policy and defers 
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("shutdown quarantines an active task before closing its database and terminates its process group", {
+	timeout: 10000,
+}, async () => {
+	const root = mkdtempSync(join(tmpdir(), "bridge-stop-"));
+	const tasksFile = join(root, "tasks.json");
+	const config = configSchema.parse({
+		relayUrl: "https://relay.example.com",
+		clientTokenEntry: "test/client/token",
+		credsBin: "creds",
+		codexBin: "codex",
+		ghBin: "gh",
+		stateDir: root,
+		codexHome: root,
+		repositories: [{ repo: "owner/repository", path: root }],
+		reviewAuthors: ["bot"],
+		tasksFile,
+	});
+	const task = {
+		id: "shutdown",
+		module: "source",
+		executable: process.execPath,
+		args: [
+			"-e",
+			'process.stdin.resume();process.stdin.on("end",()=>setInterval(()=>{},1000));',
+		],
+		cwd: root,
+		timeoutMs: 5000,
+		enabled: true,
+	};
+	writeFileSync(tasksFile, JSON.stringify({ version: 1, tasks: [task] }));
+	const db = new DatabaseSync(":memory:");
+	const store = new ModuleStore(db);
+	const tasks = new ModuleTasks(config, store, {
+		owners: () => 0,
+		githubBusy: () => false,
+		githubCount: () => 0,
+		checkoutBusy: async () => false,
+		released: () => {},
+	});
+	try {
+		store.receive({
+			id: `module:${randomUUID()}`,
+			kind: "module",
+			module: task.module,
+			task: task.id,
+			inputs: {},
+		});
+		await tasks.drain();
+		const child = tasks.running.get(`task:${task.id}`)?.child;
+		assert.ok(child?.pid);
+		const closed = once(child, "close");
+		tasks.stop();
+		assert.equal(store.list()[0].state, "blocked");
+		db.close();
+		await closed;
+		assert.equal(tasks.running.size, 0);
+		const pid = child.pid;
+		assert.ok(pid);
+		assert.throws(() => process.kill(-pid, 0));
+	} finally {
+		tasks.stop();
+		if (db.isOpen) db.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});

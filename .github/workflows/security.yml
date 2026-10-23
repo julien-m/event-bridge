@@ -12,6 +12,7 @@ jobs:
   gitleaks:
     name: Secret scan
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,6 +27,7 @@ jobs:
   trivy-fs:
     name: Filesystem vulnerability scan
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Checkout
         uses: actions/checkout@v4
