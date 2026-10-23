@@ -32,6 +32,17 @@ export class Dispatcher extends EventEmitter {
 	private draining = false;
 	private wakeAgain = false;
 	private stopped = false;
+	private lastStartedAt: number | null = null;
+	private lastFinishedAt: number | null = null;
+	status() {
+		return {
+			stopped: this.stopped,
+			draining: this.draining,
+			lastStartedAt: this.lastStartedAt,
+			lastFinishedAt: this.lastFinishedAt,
+			running: this.running.size,
+		};
+	}
 	readonly running = new Map<
 		string,
 		{ id: string; child?: ChildProcess; cancelled?: boolean }
@@ -78,6 +89,8 @@ export class Dispatcher extends EventEmitter {
 			return;
 		}
 		this.draining = true;
+		this.lastStartedAt = Date.now();
+		this.emit("status");
 		try {
 			do {
 				this.wakeAgain = false;
@@ -259,6 +272,8 @@ export class Dispatcher extends EventEmitter {
 			} while (this.wakeAgain);
 		} finally {
 			this.draining = false;
+			this.lastFinishedAt = Date.now();
+			this.emit("status");
 		}
 	}
 	private cancel(
@@ -292,6 +307,7 @@ export class Dispatcher extends EventEmitter {
 	}
 	stop(): void {
 		this.stopped = true;
+		this.emit("status");
 		for (const job of this.running.values()) this.cancel(job);
 	}
 }

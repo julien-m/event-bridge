@@ -33,11 +33,14 @@ if (operation === "start") {
 		),
 	);
 } else if (operation === "status") {
-	const store = new Store(join(config.stateDir, "inbox.sqlite"));
+	const store = new Store(join(config.stateDir, "inbox.sqlite"), true);
 	try {
 		console.log(
 			JSON.stringify(
-				{ jobs: store.list(), moduleJobs: new ModuleStore(store.db).list() },
+				{
+					jobs: store.list(),
+					moduleJobs: new ModuleStore(store.db, true).list(),
+				},
 				null,
 				2,
 			),

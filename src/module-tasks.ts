@@ -48,20 +48,41 @@ export type ModuleJob = ModuleEvent & {
 
 export class ModuleStore {
 	private readonly db: DatabaseSync;
-	constructor(db: DatabaseSync) {
+	onChange?: (
+		id: string,
+		state: TaskState,
+		module: string,
+		resource: string,
+	) => void;
+	constructor(db: DatabaseSync, readOnly = false) {
 		this.db = db;
+		if (readOnly) return;
 		db.exec(
 			"CREATE TABLE IF NOT EXISTS module_jobs(id TEXT PRIMARY KEY,body TEXT NOT NULL,state TEXT NOT NULL,detail TEXT NOT NULL DEFAULT '',resource TEXT NOT NULL DEFAULT ''); CREATE UNIQUE INDEX IF NOT EXISTS one_module_task_per_resource ON module_jobs(resource) WHERE state='running'; CREATE INDEX IF NOT EXISTS module_jobs_resource_state ON module_jobs(resource,state)",
 		);
+		// The daemon writer owns additive migrations; old receipt times stay explicitly unknown.
+		for (const column of ["received", "updated"])
+			if (
+				!db
+					.prepare("PRAGMA table_info(module_jobs)")
+					.all()
+					.some((row) => row.name === column)
+			)
+				db.exec(`ALTER TABLE module_jobs ADD COLUMN ${column} INTEGER`);
+		db.exec(
+			"CREATE INDEX IF NOT EXISTS module_observation_state_receipt ON module_jobs(state,received)",
+		);
 	}
 	receive(event: ModuleEvent): boolean {
-		return (
+		const inserted =
 			this.db
 				.prepare(
-					"INSERT OR IGNORE INTO module_jobs(id,body,state) VALUES(?,?,'queued')",
+					"INSERT OR IGNORE INTO module_jobs(id,body,state,received,updated) VALUES(?,?,'queued',?,?)",
 				)
-				.run(event.id, JSON.stringify(event)).changes === 1
-		);
+				.run(event.id, JSON.stringify(event), Date.now(), Date.now())
+				.changes === 1;
+		if (inserted) this.onChange?.(event.id, "queued", event.module, "");
+		return inserted;
 	}
 	hasBlocked(resource: string): boolean {
 		return (
@@ -95,8 +116,16 @@ export class ModuleStore {
 	}
 	set(id: string, state: TaskState, detail = "", resource = ""): void {
 		this.db
-			.prepare("UPDATE module_jobs SET state=?,detail=?,resource=? WHERE id=?")
-			.run(state, detail.slice(0, 2000), resource, id);
+			.prepare(
+				"UPDATE module_jobs SET state=?,detail=?,resource=?,updated=? WHERE id=?",
+			)
+			.run(state, detail.slice(0, 2000), resource, Date.now(), id);
+		const row = this.db
+			.prepare(
+				"SELECT json_extract(body,'$.module') AS module FROM module_jobs WHERE id=?",
+			)
+			.get(id);
+		if (row) this.onChange?.(id, state, String(row.module), resource);
 	}
 	recover(): void {
 		this.db
@@ -114,6 +143,7 @@ export interface TaskGuards {
 	checkoutBusy: (path: string) => Promise<boolean>;
 	released: () => void;
 	failed?: (event: string) => void;
+	changed?: () => void;
 }
 /** A process error is uncertain and never automatically retried. */
 export class ModuleTasks {
@@ -122,6 +152,23 @@ export class ModuleTasks {
 		{ child: ChildProcess; cancel: () => void }
 	>();
 	private stopped = false;
+	private lastStartedAt: number | null = null;
+	private lastFinishedAt: number | null = null;
+	private configurationValid: boolean | null = null;
+	private registered = 0;
+	private activeTasks = 0;
+	status() {
+		return {
+			stopped: this.stopped,
+			draining: this.draining,
+			lastStartedAt: this.lastStartedAt,
+			lastFinishedAt: this.lastFinishedAt,
+			running: this.running.size,
+			configurationValid: this.configurationValid,
+			registered: this.registered,
+			activeTasks: this.activeTasks,
+		};
+	}
 	private draining = false;
 	private again = false;
 	private readonly config: Config;
@@ -153,13 +200,19 @@ export class ModuleTasks {
 	async drain(): Promise<void> {
 		if (this.draining || this.stopped) return;
 		this.draining = true;
+		this.lastStartedAt = Date.now();
+		this.guards.changed?.();
 		try {
 			do {
 				this.again = false;
 				let tasks: LocalTask[];
 				try {
 					tasks = this.tasks();
+					this.configurationValid = true;
+					this.registered = tasks.length;
+					this.activeTasks = tasks.filter((task) => task.enabled).length;
 				} catch {
+					this.configurationValid = false;
 					this.guards.failed?.("task_configuration_invalid");
 					return;
 				}
@@ -272,6 +325,8 @@ export class ModuleTasks {
 			} while (this.again);
 		} finally {
 			this.draining = false;
+			this.lastFinishedAt = Date.now();
+			this.guards.changed?.();
 		}
 	}
 	private start(
@@ -342,6 +397,7 @@ export class ModuleTasks {
 	stop(): void {
 		if (this.stopped) return;
 		this.stopped = true;
+		this.guards.changed?.();
 		for (const job of this.store.list())
 			if (job.state === "running")
 				this.store.set(

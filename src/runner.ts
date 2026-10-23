@@ -1,13 +1,7 @@
 /** Run one repair in a disposable clone using existing ChatGPT authentication only. */
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
-	createWriteStream,
-	mkdirSync,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { Config } from "./config.ts";
 import type { Signal } from "./events.ts";
@@ -108,19 +102,15 @@ export async function runRepair(
 		throw new PreparationCancelled();
 	}
 	const output = join(reports, `${fingerprint}.txt`);
-	const log = createWriteStream(join(reports, `${fingerprint}.jsonl`), {
-		mode: 0o600,
-	});
+	// Raw agent stdout/stderr can contain prompts and secrets; only safe lifecycle events are journaled.
 	const env = { ...chatgptEnvironment(), CODEX_HOME: config.codexHome };
 	const child = spawn(config.codexBin, codexArguments(output), {
 		cwd: root,
 		env,
 		detached: true,
-		stdio: ["pipe", "pipe", "pipe"],
+		stdio: ["pipe", "ignore", "ignore"],
 	});
 	onSpawn(child);
-	child.stdout?.pipe(log, { end: false });
-	child.stderr?.pipe(log, { end: false });
 	child.stdin?.end(taskPrompt(signal));
 	const kill = () => {
 		if (child.pid)
@@ -159,6 +149,5 @@ export async function runRepair(
 	} finally {
 		clearTimeout(timer);
 		if (hardStop) clearTimeout(hardStop);
-		log.end();
 	}
 }

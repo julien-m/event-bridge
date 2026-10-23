@@ -47,7 +47,27 @@ Before installing hooks, attach the dedicated hostname to the Worker and configu
 
 Setup discovers only direct Git checkouts owned by the authenticated GitHub account and resolves canonical GitHub names, excludes archived/disabled repositories, and deduplicates remotes. Inspect the generated repository allowlist **before** installing hooks. New repositories are not enrolled silently: rerun setup and hooks explicitly. Setup uses the existing `cloudflare/account/id` and `cloudflare/wrangler/api-key` Keychain entries; it creates bridge-specific webhook and client secrets without printing them. No local path, account identifier, token, event payload or execution report belongs in Git.
 
-Configuration lives in `~/.config/codex-github-bridge/config.json`. State and reports live in `~/Library/Application Support/codex-github-bridge/`. The launchd label is `com.codex.github-bridge`; it has no calendar or interval trigger. The Mac connects outward; no inbound port is opened on the Mac. The relay keeps pending events while the Mac is asleep.
+Configuration lives in `~/.config/codex-github-bridge/config.json`. State and reports live in `~/Library/Application Support/codex-github-bridge/`. The launchd label is `com.codex.github-bridge`; it has no calendar or interval trigger. The Mac connects outward to the relay; it opens no externally reachable listener. The optional observation panel binds only to IPv4 loopback. The relay keeps pending events while the Mac is asleep.
+
+## Local observation panel
+
+Add the following property to the private configuration to opt in, then restart the daemon deliberately when no active work would be interrupted. The panel remains disabled when this property is absent. Setup preserves this choice.
+
+```json
+"observability": { "port": 17864 }
+```
+
+Open `http://127.0.0.1:17864` on the same Mac. The address must use `127.0.0.1`, including the configured port; other Host/Origin values are rejected. Port zero requests an ephemeral listener and is intended for local tests. The page has no retry, stop or execution controls. There is no CORS or external listener. Other processes on this Mac can read this local view; it is not an authentication boundary between local users.
+
+The view separates process activation, Worker transport, ownership observation and the two dispatchers. A connected socket does not prove that work is being dispatched. It shows last dispatcher checks, configuration validity and enabled task counts, local queue counts by state, first-receipt ages and unknown historical ages. It never queries the relay queue or polls GitHub. Forwarding and successful process exit are explicitly distinct from a validated correction.
+
+The server pushes coalesced SSE snapshots on changes. Every SSE reconnect receives a fresh snapshot, independent of any lost events. A local heartbeat runs only while viewers are connected; the browser labels lost or stale data and computes display ages locally. Slow clients are disconnected rather than buffered indefinitely; eight simultaneous SSE viewers are allowed.
+
+The page keeps at most 100 recent event groups since process start, with error/blocked/module/repository filters. Counts and latest receipt, ACK sent, ACK confirmed, result and safe error code also cover the current process lifetime. Durable queue counts survive restarts. Receipts and deduplication IDs are retained in SQLite independently of journal rotation. Old receipts without a known first-local-receipt time are not backfilled with invented times.
+
+Operational events go to `logs/events.jsonl` in the private state directory, rotated through `.1` and `.2`, each at most 10 MiB. Explicitly permitted fields are timestamp, first timestamp, safe code, severity, source, hashed correlation ID, configured repository name, module identifier, state and count. No payload, token, header, prompt, raw error, command output or CLI status object is included. Journal I/O failures appear as a fault flag. New Codex runs no longer capture raw stdout/stderr. Existing logs and final repair report artifacts are preserved for reconciliation and are outside this journal retention budget; neither is served by the panel.
+
+Read [the local observation validation notes](docs/observability.md) for the evidence and remaining activation limits.
 
 ## Inspect and recover
 

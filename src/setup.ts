@@ -148,6 +148,7 @@ const config = configSchema.parse({
 	relayUrl,
 	adminTokenEntry: "event-bridge/prod/admin-token",
 	tasksFile: previous?.tasksFile,
+	observability: previous?.observability,
 	clientTokenEntry: clientEntry,
 	credsBin,
 	ghBin,

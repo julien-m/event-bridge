@@ -19,10 +19,23 @@ export type Job = Signal & {
 
 export class Store {
 	readonly db: DatabaseSync;
-	constructor(path: string) {
-		this.db = new DatabaseSync(path);
+	onChange?: (id: string, state: JobState, repo: string) => void;
+	constructor(path: string, readOnly = false) {
+		this.db = new DatabaseSync(path, { readOnly });
+		if (readOnly) return;
 		this.db.exec(
 			"PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, repo TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', thread TEXT, updated INTEGER NOT NULL); CREATE UNIQUE INDEX IF NOT EXISTS one_runner_per_repo ON jobs(repo) WHERE state='running';",
+		);
+		// Add metadata only in the writer; historical first receipt times stay unknown.
+		if (
+			!this.db
+				.prepare("PRAGMA table_info(jobs)")
+				.all()
+				.some((row) => row.name === "received")
+		)
+			this.db.exec("ALTER TABLE jobs ADD COLUMN received INTEGER");
+		this.db.exec(
+			"CREATE INDEX IF NOT EXISTS jobs_observation_state_receipt ON jobs(state,received)",
 		);
 	}
 	recoverInterrupted(): void {
@@ -34,14 +47,20 @@ export class Store {
 			.run();
 	}
 	receive(signal: Signal): boolean {
-		return (
+		const inserted =
 			this.db
 				.prepare(
-					"INSERT OR IGNORE INTO jobs(id,repo,body,state,updated) VALUES(?,?,?,'queued',?)",
+					"INSERT OR IGNORE INTO jobs(id,repo,body,state,updated,received) VALUES(?,?,?,'queued',?,?)",
 				)
-				.run(signal.id, signal.repo, JSON.stringify(signal), Date.now())
-				.changes === 1
-		);
+				.run(
+					signal.id,
+					signal.repo,
+					JSON.stringify(signal),
+					Date.now(),
+					Date.now(),
+				).changes === 1;
+		if (inserted) this.onChange?.(signal.id, "queued", signal.repo);
+		return inserted;
 	}
 	set(
 		id: string,
@@ -52,6 +71,8 @@ export class Store {
 		this.db
 			.prepare("UPDATE jobs SET state=?,detail=?,thread=?,updated=? WHERE id=?")
 			.run(state, detail.slice(0, 2000), thread, Date.now(), id);
+		const row = this.db.prepare("SELECT repo FROM jobs WHERE id=?").get(id);
+		if (row) this.onChange?.(id, state, String(row.repo));
 	}
 	list(states?: JobState[]): Job[] {
 		const rows = this.db

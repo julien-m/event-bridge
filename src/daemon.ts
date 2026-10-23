@@ -10,8 +10,15 @@ import { signalSchema } from "./events.ts";
 import { command } from "./github.ts";
 import { ModuleStore, ModuleTasks } from "./module-tasks.ts";
 import { moduleEventSchema } from "./modules.ts";
+import { startPanel } from "./panel.ts";
 import { Sessions } from "./sessions.ts";
 import { Store } from "./store.ts";
+import {
+	BoundedJournal,
+	type Observation,
+	readQueueSummary,
+	Telemetry,
+} from "./telemetry.ts";
 
 export function startDaemon(config: Config): () => void {
 	process.umask(0o077);
@@ -49,14 +56,56 @@ export function startDaemon(config: Config): () => void {
 			).trim().length > 0,
 		released: () => dispatcher.wake(),
 		failed: (event) =>
-			console.error(JSON.stringify({ at: new Date().toISOString(), event })),
+			log(
+				event === "task_configuration_invalid"
+					? event
+					: "module_dispatcher_failed",
+			),
+		changed: () => telemetry.changed(),
 	});
-	const log = (event: string, detail: unknown = {}) =>
-		console.log(
-			JSON.stringify({ at: new Date().toISOString(), event, detail }),
-		);
+	const currentModuleTasks = moduleTasks;
 	let stopping = false;
 	let unsafe = false;
+	let ownershipUnsafe = false;
+	let worker: "connecting" | "connected" | "disconnected" = "connecting";
+	let ownershipCheckedAt: number | null = null;
+	const telemetry = new Telemetry(
+		new BoundedJournal(join(config.stateDir, "logs")),
+		config.repositories.map((repo) => repo.repo),
+		() => ({
+			process: stopping ? "stopping" : "running",
+			enabled: config.enabled,
+			worker,
+			ownership: ownershipUnsafe
+				? "unsafe"
+				: ownershipCheckedAt === null
+					? "starting"
+					: "watching",
+			ownershipCheckedAt,
+			owners: [...sessions.owners.values()].filter(
+				(owner) => !owner.internal && (owner.active || owner.uncertain),
+			).length,
+			github: dispatcher.status(),
+			modules: currentModuleTasks.status(),
+		}),
+		() => readQueueSummary(store.db),
+	);
+	const log = (code: Observation["code"], detail: Partial<Observation> = {}) =>
+		telemetry.record({ ...detail, code, source: detail.source ?? "system" });
+	store.onChange = (id, state, repo) =>
+		log("job_state", { source: "github", id, state, repo });
+	moduleStore.onChange = (id, state, module, repo) =>
+		log("job_state", { source: "module", id, state, module, repo });
+	dispatcher.on("status", () => telemetry.changed());
+	let panel: Awaited<ReturnType<typeof startPanel>> | undefined;
+	if (config.observability) {
+		void startPanel(telemetry, config.observability.port)
+			.then((started) => {
+				if (stopping) void started.close();
+				else panel = started;
+			})
+			.catch(() => log("panel_failed"));
+	}
 	let socket: WebSocket | undefined;
 	let retry: NodeJS.Timeout | undefined;
 	let debounce: NodeJS.Timeout | undefined;
@@ -71,24 +120,30 @@ export function startDaemon(config: Config): () => void {
 			}
 		}, 250);
 	};
-	sessions.on("changed", wake);
-	sessions.on("unsafe", (error) => {
+	sessions.on("changed", () => {
+		ownershipCheckedAt = Date.now();
+		telemetry.changed();
+		wake();
+	});
+	sessions.on("unsafe", () => {
+		unsafe = true;
+		ownershipUnsafe = true;
+		dispatcher.stop();
+		moduleTasks?.stop();
+		log("ownership_watch_failed");
+	});
+	dispatcher.on("error", () => {
 		unsafe = true;
 		dispatcher.stop();
 		moduleTasks?.stop();
-		log("ownership_watch_failed", String(error));
+		log("dispatcher_failed");
 	});
-	dispatcher.on("error", (error) => {
-		unsafe = true;
-		dispatcher.stop();
-		moduleTasks?.stop();
-		log("dispatcher_failed", String(error));
-	});
-	dispatcher.on("outcome", (id) => {
-		log("job_outcome", { id });
+	dispatcher.on("outcome", () => {
 		moduleTasks?.wake();
 	});
 	sessions.start();
+	ownershipCheckedAt = Date.now();
+	telemetry.changed();
 	for (const repository of config.repositories) {
 		const watcher = watch(
 			repository.path,
@@ -107,11 +162,12 @@ export function startDaemon(config: Config): () => void {
 				wake();
 			},
 		);
-		watcher.on("error", (error) => {
+		watcher.on("error", () => {
 			unsafe = true;
+			ownershipUnsafe = true;
 			dispatcher.stop();
 			moduleTasks?.stop();
-			log("repository_watch_failed", String(error));
+			log("repository_watch_failed");
 		});
 		watchers.push(watcher);
 	}
@@ -128,6 +184,8 @@ export function startDaemon(config: Config): () => void {
 	}
 	const connect = () => {
 		if (stopping) return;
+		worker = "connecting";
+		telemetry.changed();
 		const url = new URL("/connect", config.relayUrl);
 		url.protocol = "wss:";
 		socket = new WebSocket(url, {
@@ -139,6 +197,7 @@ export function startDaemon(config: Config): () => void {
 		});
 		socket.on("open", () => {
 			failures = 0;
+			worker = "connected";
 			log("relay_connected");
 			dispatcher.wake();
 			moduleTasks?.wake();
@@ -148,11 +207,27 @@ export function startDaemon(config: Config): () => void {
 				const message = JSON.parse(bytes.toString());
 				if (!message || typeof message !== "object" || Array.isArray(message))
 					throw new Error("Invalid event envelope");
-				if (typeof message.acknowledged === "string") return;
+				if (typeof message.acknowledged === "string") {
+					log("ack_confirmed", { id: message.acknowledged });
+					return;
+				}
 				if (message.kind === "module") {
 					const event = moduleEventSchema.parse(message);
 					const inserted = moduleStore.receive(event);
-					socket?.send(JSON.stringify({ ack: event.id }));
+					log("event_received", {
+						source: "module",
+						id: event.id,
+						module: event.module,
+					});
+					socket?.send(JSON.stringify({ ack: event.id }), (error) => {
+						if (!error)
+							log("ack_sent", {
+								source: "module",
+								id: event.id,
+								module: event.module,
+							});
+						else log("relay_connection_error");
+					});
 					if (inserted && !unsafe) moduleTasks?.wake();
 					return;
 				}
@@ -161,18 +236,32 @@ export function startDaemon(config: Config): () => void {
 					throw new Error("Repository outside local allowlist");
 				// Acknowledge only after the local WAL has committed, including duplicate receipts.
 				const inserted = store.receive(signal);
-				socket?.send(JSON.stringify({ ack: signal.id }));
+				log("event_received", {
+					source: "github",
+					id: signal.id,
+					repo: signal.repo,
+				});
+				socket?.send(JSON.stringify({ ack: signal.id }), (error) => {
+					if (!error)
+						log("ack_sent", {
+							source: "github",
+							id: signal.id,
+							repo: signal.repo,
+						});
+					else log("relay_connection_error");
+				});
 				if (inserted) {
-					log("event_received", { id: signal.id, repo: signal.repo });
 					if (!unsafe) dispatcher.wake();
 				}
-			} catch (error) {
-				log("event_rejected", String(error));
+			} catch {
+				log("event_rejected");
 				socket?.close(1008, "Invalid event");
 			}
 		});
-		socket.on("error", (error) => log("relay_connection_error", error.message));
+		socket.on("error", () => log("relay_connection_error"));
 		socket.on("close", () => {
+			worker = "disconnected";
+			log("relay_disconnected");
 			if (stopping) return;
 			// Reconnection after a transport failure is a one-shot backoff, never a GitHub scan.
 			const delay = Math.min(60000, 1000 * 2 ** Math.min(failures++, 6));
@@ -182,9 +271,11 @@ export function startDaemon(config: Config): () => void {
 	connect();
 	dispatcher.wake();
 	moduleTasks.wake();
-	log("started", { repositories: config.repositories.length });
+	log("started");
 	return () => {
 		stopping = true;
+		log("stopped");
+		void panel?.close().catch(() => log("panel_failed"));
 		clearTimeout(retry);
 		clearTimeout(debounce);
 		socket?.close();

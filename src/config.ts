@@ -8,6 +8,11 @@ import { repoName } from "./events.ts";
 
 export const configSchema = z.object({
 	tasksFile: z.string().min(1).optional(),
+	// Opt in explicitly; an absent panel configuration opens no local listening port.
+	observability: z
+		.object({ port: z.number().int().min(0).max(65535) })
+		.strict()
+		.optional(),
 	adminTokenEntry: z.string().min(1).optional(),
 	relayUrl: z
 		.string()
