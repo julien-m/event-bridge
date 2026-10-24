@@ -516,3 +516,106 @@ test("native custom exec working directories establish the existing owner", {
 		f.cleanup();
 	}
 });
+
+test("unchanged job decisions preserve timestamps and emit no extra observations", {
+	timeout: 2000,
+}, () => {
+	const f = setup();
+	try {
+		let changes = 0;
+		f.store.onChange = () => changes++;
+		f.store.receive(f.signal);
+		f.store.set(f.signal.id, "deferred", "Owner busy");
+		const before = f.store.db
+			.prepare("SELECT updated FROM jobs WHERE id=?")
+			.get(f.signal.id);
+		f.store.set(f.signal.id, "deferred", "Owner busy");
+		assert.deepEqual(
+			f.store.db
+				.prepare("SELECT updated FROM jobs WHERE id=?")
+				.get(f.signal.id),
+			before,
+		);
+		assert.equal(changes, 2);
+		f.store.set(f.signal.id, "deferred", "Owner busy", randomUUID());
+		f.store.set(f.signal.id, "deferred", "Owner unreachable");
+		assert.equal(changes, 4);
+	} finally {
+		f.cleanup();
+	}
+});
+
+test("persisted deferred events are revalidated before ownership without polling on wakes", {
+	timeout: 2000,
+}, async () => {
+	const f = setup();
+	try {
+		const owner = {
+			id: randomUUID(),
+			repos: new Set([f.repo]),
+			active: true,
+			uncertain: true,
+		};
+		f.sessions.owners.set(owner.id, owner);
+		f.store.receive(f.signal);
+		f.store.set(f.signal.id, "deferred", "Owner unknown");
+		let validations = 0;
+		f.actions.validate = async () => {
+			validations++;
+			return { actionable: false, reason: "Closed pull request" };
+		};
+		await new Dispatcher(f.config, f.store, f.sessions, f.actions).drain();
+		assert.equal(f.store.list()[0].state, "ignored");
+		assert.deepEqual(f.calls, { repair: 0, forward: 0 });
+		const next = { ...f.signal, id: randomUUID() };
+		f.store.receive(next);
+		f.store.set(next.id, "deferred", "Owner unknown");
+		f.actions.validate = async () => {
+			validations++;
+			return { actionable: true, reason: "Current" };
+		};
+		const dispatcher = new Dispatcher(f.config, f.store, f.sessions, f.actions);
+		await dispatcher.drain();
+		await dispatcher.drain();
+		await dispatcher.drain();
+		assert.equal(validations, 2);
+		assert.equal(
+			f.store.list().find((job) => job.id === next.id)?.state,
+			"deferred",
+		);
+		assert.deepEqual(f.calls, { repair: 0, forward: 0 });
+	} finally {
+		f.cleanup();
+	}
+});
+
+test("stopping while a persisted deferral is revalidated never forwards or repairs", {
+	timeout: 2000,
+}, async () => {
+	const f = setup();
+	try {
+		const owner = {
+			id: randomUUID(),
+			repos: new Set([f.repo]),
+			active: true,
+			uncertain: false,
+		};
+		f.sessions.owners.set(owner.id, owner);
+		f.store.receive(f.signal);
+		f.store.set(f.signal.id, "deferred", "Owner unknown");
+		let release!: (value: { actionable: boolean; reason: string }) => void;
+		f.actions.validate = () =>
+			new Promise((resolve) => {
+				release = resolve;
+			});
+		const dispatcher = new Dispatcher(f.config, f.store, f.sessions, f.actions);
+		const draining = dispatcher.drain();
+		dispatcher.stop();
+		release({ actionable: true, reason: "Current" });
+		await draining;
+		assert.deepEqual(f.calls, { repair: 0, forward: 0 });
+		assert.equal(f.store.list()[0].state, "deferred");
+	} finally {
+		f.cleanup();
+	}
+});

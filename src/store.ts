@@ -68,9 +68,14 @@ export class Store {
 		detail = "",
 		thread: string | null = null,
 	): void {
-		this.db
-			.prepare("UPDATE jobs SET state=?,detail=?,thread=?,updated=? WHERE id=?")
-			.run(state, detail.slice(0, 2000), thread, Date.now(), id);
+		// Filesystem wakes can repeat a decision; only real changes advance history.
+		const summary = detail.slice(0, 2000);
+		const result = this.db
+			.prepare(
+				"UPDATE jobs SET state=?,detail=?,thread=?,updated=? WHERE id=? AND (state IS NOT ? OR detail IS NOT ? OR thread IS NOT ?)",
+			)
+			.run(state, summary, thread, Date.now(), id, state, summary, thread);
+		if (!result.changes) return;
 		const row = this.db.prepare("SELECT repo FROM jobs WHERE id=?").get(id);
 		if (row) this.onChange?.(id, state, String(row.repo));
 	}

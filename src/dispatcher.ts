@@ -32,6 +32,8 @@ export class Dispatcher extends EventEmitter {
 	private draining = false;
 	private wakeAgain = false;
 	private stopped = false;
+	// Recheck persisted deferrals once after startup, never on every filesystem wake.
+	private inspected = new Set<string>();
 	private lastStartedAt: number | null = null;
 	private lastFinishedAt: number | null = null;
 	status() {
@@ -115,9 +117,11 @@ export class Dispatcher extends EventEmitter {
 						this.store.set(job.id, "blocked", "Repository not configured");
 						continue;
 					}
-					if (job.state === "queued") {
+					if (!this.inspected.has(job.id)) {
 						try {
 							const verdict = await this.actions.validate(job);
+							if (this.stopped) return;
+							this.inspected.add(job.id);
 							if (!verdict.actionable) {
 								this.store.set(job.id, "ignored", verdict.reason);
 								continue;
