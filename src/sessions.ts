@@ -1,20 +1,23 @@
 /** Observe Codex lifecycle logs with filesystem events; never poll GitHub or restart an active turn. */
 
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
 	closeSync,
 	existsSync,
 	type FSWatcher,
 	openSync,
+	readlinkSync,
 	readSync,
 	statSync,
 	watch,
 } from "node:fs";
-import { isAbsolute, join, resolve, sep } from "node:path";
-import { createInterface } from "node:readline";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { controlSocketPath } from "./app-server.ts";
 import type { Config } from "./config.ts";
+
+export { forward } from "./app-server.ts";
 
 export type Owner = {
 	id: string;
@@ -23,6 +26,7 @@ export type Owner = {
 	uncertain: boolean;
 	cwd?: string;
 	internal?: boolean;
+	revision?: number;
 };
 export class Sessions extends EventEmitter {
 	readonly owners = new Map<string, Owner>();
@@ -31,6 +35,8 @@ export class Sessions extends EventEmitter {
 		{ offset: number; remainder: string; owner: Owner }
 	>();
 	private watcher?: FSWatcher;
+	private transportWatchers: FSWatcher[] = [];
+	transportVersion = 0;
 	private origins = new Map<string, string | null>();
 	private config: Config;
 	constructor(config: Config) {
@@ -39,6 +45,7 @@ export class Sessions extends EventEmitter {
 	}
 
 	start(): void {
+		this.watchTransport();
 		const root = join(this.config.codexHome, "sessions");
 		if (!existsSync(root))
 			throw new Error(
@@ -67,6 +74,44 @@ export class Sessions extends EventEmitter {
 			for (const row of rows) this.ingest(row.rollout_path, true);
 		} finally {
 			db.close();
+		}
+	}
+
+	/** Follow the closest existing ancestor so socket creation needs no polling. */
+	private watchTransport(): void {
+		for (const watcher of this.transportWatchers) watcher.close();
+		this.transportWatchers = [];
+		const socket = controlSocketPath(this.config);
+		const targets = new Set([socket]);
+		try {
+			targets.add(resolve(dirname(socket), readlinkSync(socket)));
+		} catch {
+			/* Direct or absent optional endpoints have no symlink target. */
+		}
+		const directories = new Set<string>();
+		for (const target of targets) {
+			let directory = dirname(target);
+			while (!existsSync(directory) && dirname(directory) !== directory)
+				directory = dirname(directory);
+			directories.add(directory);
+		}
+		for (const directory of directories) {
+			const watcher = watch(directory, (_event, file) => {
+				const changed = file ? resolve(directory, file.toString()) : directory;
+				if (
+					![...targets].some(
+						(target) => target === changed || target.startsWith(changed + sep),
+					)
+				)
+					return;
+				this.transportVersion++;
+				this.watchTransport();
+				this.emit("changed");
+			});
+			watcher.on("error", () => {
+				/* No transport error authorizes a second session. */
+			});
+			this.transportWatchers.push(watcher);
 		}
 	}
 
@@ -187,6 +232,7 @@ export class Sessions extends EventEmitter {
 		if (record.type === "event_msg") {
 			if (payload.type === "task_started") {
 				owner.active = true;
+				owner.revision = (owner.revision ?? 0) + 1;
 				owner.uncertain = false;
 			}
 			if (
@@ -238,102 +284,13 @@ export class Sessions extends EventEmitter {
 		return [...this.owners.values()].flatMap((owner) => {
 			if (owner.internal || !(owner.active || owner.uncertain)) return [];
 			if (owner.repos.has(repo)) return [owner];
-			// An active projectless turn has not established its scope yet. Never guess its target.
-			return owner.repos.size === 0 ? [{ ...owner, uncertain: true }] : [];
+			// Unknown scope is not a claim on every repository. Later path evidence
+			// adds ownership and wakes conflict cancellation before a repair can spawn.
+			return [];
 		});
 	}
 	close(): void {
 		this.watcher?.close();
-	}
-}
-
-/** Send to a shared live app-server only; absence never falls back to concurrent exec resume. */
-export async function forward(
-	config: Config,
-	owner: Owner,
-	message: string,
-): Promise<boolean> {
-	const child = spawn(config.codexBin, ["app-server", "proxy"], {
-		stdio: ["pipe", "pipe", "pipe"],
-	});
-	const pending = new Map<
-		number,
-		{
-			resolve: (result: Record<string, unknown>) => void;
-			reject: (error: Error) => void;
-		}
-	>();
-	let sequence = 0;
-	const lines = createInterface({ input: child.stdout });
-	const call = (method: string, params: unknown = {}) =>
-		new Promise<Record<string, unknown>>((resolve, reject) => {
-			const id = ++sequence;
-			pending.set(id, { resolve, reject });
-			child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
-		});
-	lines.on("line", (line) => {
-		try {
-			const response = JSON.parse(line);
-			const waiter = pending.get(response.id);
-			if (!waiter) return;
-			pending.delete(response.id);
-			if (response.error)
-				waiter.reject(new Error("App-server rejected request"));
-			else waiter.resolve(response.result);
-		} catch {
-			/* Non-protocol output cannot authorize a delivery. */
-		}
-	});
-	child.on("error", () => {
-		for (const waiter of pending.values())
-			waiter.reject(new Error("App-server unavailable"));
-	});
-	child.on("exit", () => {
-		for (const waiter of pending.values())
-			waiter.reject(new Error("App-server disconnected"));
-	});
-	const timer = setTimeout(() => child.kill(), 5000);
-	let steering = false;
-	child.stdin.on("error", () => {
-		for (const waiter of pending.values())
-			waiter.reject(new Error("App-server input unavailable"));
-	});
-	try {
-		await call("initialize", {
-			clientInfo: { name: "codex_github_bridge", version: "0.1.0" },
-		});
-		child.stdin.write(
-			`${JSON.stringify({ method: "initialized", params: {} })}\n`,
-		);
-		const result = await call("thread/read", {
-			threadId: owner.id,
-			includeTurns: false,
-		});
-		const thread = result.thread as {
-			status: { type: string };
-			turns?: { id: string; status: string }[];
-		};
-		if (thread.status.type !== "active") return false;
-		const turns = await call("thread/turns/list", {
-			threadId: owner.id,
-			limit: 1,
-			itemsView: "notLoaded",
-		});
-		const turn = (turns.data as { id: string; status: string }[])?.[0];
-		if (turn?.status !== "inProgress") return false;
-		steering = true;
-		await call("turn/steer", {
-			threadId: owner.id,
-			expectedTurnId: turn.id,
-			input: [{ type: "text", text: message }],
-		});
-		return true;
-	} catch (error) {
-		if (steering) throw error;
-		return false;
-	} finally {
-		clearTimeout(timer);
-		lines.close();
-		child.kill();
+		for (const watcher of this.transportWatchers) watcher.close();
 	}
 }

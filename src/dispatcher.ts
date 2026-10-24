@@ -15,7 +15,11 @@ export interface Actions {
 	validate: (
 		signal: Signal,
 	) => Promise<{ actionable: boolean; reason: string }>;
-	forward: (owner: Owner, message: string) => Promise<boolean>;
+	forward: (
+		owner: Owner,
+		message: string,
+		stillOwner?: () => boolean,
+	) => Promise<boolean>;
 	repair: (
 		signal: Signal,
 		onSpawn: (child: ChildProcess) => void,
@@ -34,6 +38,7 @@ export class Dispatcher extends EventEmitter {
 	private stopped = false;
 	// Recheck persisted deferrals once after startup, never on every filesystem wake.
 	private inspected = new Set<string>();
+	private deliveryAttempts = new Map<string, string>();
 	private lastStartedAt: number | null = null;
 	private lastFinishedAt: number | null = null;
 	status() {
@@ -73,7 +78,8 @@ export class Dispatcher extends EventEmitter {
 					)
 				).trim().length > 0,
 			validate: (signal) => revalidate(config, signal),
-			forward: (owner, message) => forward(config, owner, message),
+			forward: (owner, message, stillOwner) =>
+				forward(config, owner, message, stillOwner),
 			repair: (signal, onSpawn, beforeSpawn) =>
 				runRepair(config, signal, onSpawn, beforeSpawn),
 		};
@@ -142,8 +148,36 @@ export class Dispatcher extends EventEmitter {
 							);
 							continue;
 						}
-						if (job.state === "deferred" && job.thread === owners[0].id)
+						const deliveryKey = `${owners[0].id}:${owners[0].revision ?? 0}:${this.sessions.transportVersion}`;
+						if (this.deliveryAttempts.get(job.id) === deliveryKey) continue;
+						const stillOwner = () => {
+							this.sessions.refresh();
+							const current = this.sessions.forRepo(job.repo);
+							return (
+								!this.stopped &&
+								current.length === 1 &&
+								current[0].id === owners[0].id &&
+								!current[0].uncertain
+							);
+						};
+						// A deferred review may have changed while its owner was unavailable.
+						try {
+							const verdict = await this.actions.validate(job);
+							if (this.stopped) return;
+							if (!verdict.actionable) {
+								this.store.set(job.id, "ignored", verdict.reason);
+								continue;
+							}
+						} catch {
+							this.store.set(
+								job.id,
+								"blocked",
+								"Forwarding revalidation failed",
+							);
 							continue;
+						}
+						if (!stillOwner()) continue;
+						this.deliveryAttempts.set(job.id, deliveryKey);
 						this.store.set(
 							job.id,
 							"forwarding",
@@ -154,6 +188,7 @@ export class Dispatcher extends EventEmitter {
 							const sent = await this.actions.forward(
 								owners[0],
 								`An event arrived for the repository you already own. Integrate its triage into your current work only when appropriate; preserve the current task and checkout. Do not start a competing repair or follow the isolated-clone instructions below. ${taskPrompt(job)}`,
+								stillOwner,
 							);
 							this.store.set(
 								job.id,

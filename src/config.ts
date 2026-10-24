@@ -2,11 +2,12 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { z } from "zod";
 import { repoName } from "./events.ts";
 
 export const configSchema = z.object({
+	controlSocket: z.string().refine(isAbsolute).optional(),
 	tasksFile: z.string().min(1).optional(),
 	// Opt in explicitly; an absent panel configuration opens no local listening port.
 	observability: z

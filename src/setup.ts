@@ -149,6 +149,7 @@ const config = configSchema.parse({
 	adminTokenEntry: "event-bridge/prod/admin-token",
 	tasksFile: previous?.tasksFile,
 	observability: previous?.observability,
+	controlSocket: previous?.controlSocket,
 	clientTokenEntry: clientEntry,
 	credsBin,
 	ghBin,

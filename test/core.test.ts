@@ -473,7 +473,7 @@ test("projectless session moving into an external Git clone claims the configure
 				.join("\n")}\n`,
 		);
 		f.sessions.ingest(file);
-		assert.equal(f.sessions.forRepo(f.repo)[0]?.uncertain, true);
+		assert.equal(f.sessions.forRepo(f.repo).length, 0);
 		appendFileSync(
 			file,
 			`${JSON.stringify({ type: "turn_context", payload: { cwd: clone } })}\n`,
@@ -615,6 +615,107 @@ test("stopping while a persisted deferral is revalidated never forwards or repai
 		await draining;
 		assert.deepEqual(f.calls, { repair: 0, forward: 0 });
 		assert.equal(f.store.list()[0].state, "deferred");
+	} finally {
+		f.cleanup();
+	}
+});
+
+test("unscoped active chats do not compete with a repository owner or trigger duplicate repairs", {
+	timeout: 2000,
+}, async () => {
+	const f = setup();
+	try {
+		const file = join(f.root, "unscoped.jsonl");
+		writeFileSync(
+			file,
+			`${[
+				{ type: "session_meta", payload: { id: randomUUID(), cwd: tmpdir() } },
+				{ type: "event_msg", payload: { type: "task_started" } },
+			]
+				.map((r) => JSON.stringify(r))
+				.join("\n")}\n`,
+		);
+		f.sessions.ingest(file);
+		const owner = {
+			id: randomUUID(),
+			repos: new Set([f.repo]),
+			active: true,
+			uncertain: false,
+		};
+		f.sessions.owners.set(owner.id, owner);
+		f.store.receive(f.signal);
+		const dispatcher = new Dispatcher(f.config, f.store, f.sessions, f.actions);
+		await dispatcher.drain();
+		await dispatcher.drain();
+		assert.deepEqual(f.calls, { repair: 0, forward: 1 });
+		assert.equal(f.store.list()[0].state, "forwarded");
+		appendFileSync(
+			file,
+			`${JSON.stringify({ type: "turn_context", payload: { cwd: f.root } })}\n`,
+		);
+		f.sessions.ingest(file);
+		assert.equal(f.sessions.forRepo(f.repo).length, 2);
+	} finally {
+		f.cleanup();
+	}
+});
+
+test("only transport or turn changes retry unsent delivery; uncertain sends never retry", {
+	timeout: 2000,
+}, async () => {
+	const f = setup();
+	try {
+		const id = randomUUID();
+		const file = join(f.root, "retry-owner.jsonl");
+		writeFileSync(
+			file,
+			`${[
+				{ type: "session_meta", payload: { id, cwd: f.root } },
+				{ type: "event_msg", payload: { type: "task_started" } },
+			]
+				.map((record) => JSON.stringify(record))
+				.join("\n")}\n`,
+		);
+		f.sessions.ingest(file);
+		f.store.receive(f.signal);
+		let available = false;
+		f.actions.forward = async () => {
+			f.calls.forward++;
+			return available;
+		};
+		const dispatcher = new Dispatcher(f.config, f.store, f.sessions, f.actions);
+		await dispatcher.drain();
+		await dispatcher.drain();
+		assert.equal(f.calls.forward, 1);
+		f.sessions.transportVersion++;
+		await dispatcher.drain();
+		await dispatcher.drain();
+		assert.equal(f.calls.forward, 2);
+		available = true;
+		appendFileSync(
+			file,
+			`${JSON.stringify({ type: "event_msg", payload: { type: "task_started" } })}\n`,
+		);
+		f.sessions.ingest(file);
+		await dispatcher.drain();
+		await dispatcher.drain();
+		assert.equal(f.calls.forward, 3);
+		assert.equal(f.store.list()[0].state, "forwarded");
+		const next = { ...f.signal, id: randomUUID() };
+		f.store.receive(next);
+		f.actions.forward = async () => {
+			f.calls.forward++;
+			throw new Error("Lost receipt");
+		};
+		await dispatcher.drain();
+		assert.equal(
+			f.store.list().find((job) => job.id === next.id)?.state,
+			"blocked",
+		);
+		f.sessions.transportVersion++;
+		await dispatcher.drain();
+		assert.equal(f.calls.forward, 4);
+		assert.equal(f.calls.repair, 0);
 	} finally {
 		f.cleanup();
 	}
