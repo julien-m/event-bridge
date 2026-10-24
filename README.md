@@ -1,2 +1,117 @@
-# codex-github-bridge
-Event-driven GitHub review and CI triage with local Codex and ChatGPT authentication
+# Event Bridge
+
+An event-driven macOS companion that triages Codex review findings and failed GitHub Actions runs with your existing ChatGPT sign-in. It never scans GitHub on a timer and never needs an OpenAI API key.
+
+```mermaid
+flowchart LR
+  GH[Signed GitHub webhook] --> Relay[Cloudflare durable inbox]
+  Relay -->|authenticated outbound WebSocket| Mac[Mac SQLite inbox]
+  Mac --> Owner{Repository occupied?}
+  Owner -->|active reachable owner| Message[Steer the existing turn]
+  Owner -->|busy or unreachable| Wait[Persist and defer]
+  Owner -->|free| Repair[Isolated Codex repair branch]
+  Repair --> PR[Draft pull request]
+```
+
+## Behavior
+
+- Accepts only configured repositories and trusted Codex review authors. Clean reviews, successful CI and unrelated events are ignored.
+- Revalidates the exact PR, commit and workflow before work. Superseded failures and closed PRs do not start repairs.
+- Verifies GitHub HMAC signatures, bounds request bodies, persists before acknowledgement and deduplicates semantic event IDs.
+- Observes Codex lifecycle logs and repository filesystem events. Dirty checkouts, ambiguous owners of the same repository and unavailable ownership observation defer or block work. A chat with no repository evidence is unassigned, not the owner of every repository. New checkout or tool-directory evidence establishes its scope and wakes conflict cancellation.
+- Sends findings to the existing active turn through the shared Unix WebSocket control socket and `turn/steer` when that server is available. It verifies the thread and expected active turn before sending, and checks ownership again immediately before the mutation. **The desktop app does not necessarily expose that server. If it is unavailable, the event stays deferred; the bridge never uses concurrent `codex exec resume` as a substitute.**
+- Starts at most one repair per repository, in a separate clone and branch. A newly detected human owner stops the worker. Repairs may open draft PRs; they never merge, deploy, force-push or write to the original PR branch.
+- Enforces ChatGPT authentication and removes API-key environment variables from agent children. Subscription limits still apply. Cloudflare usage follows your Cloudflare plan.
+- Reconnection backoff, operation deadlines and filesystem-event debouncing are transport/control timers, not periodic GitHub checks.
+
+## Requirements
+
+macOS, Node.js 24+, Git, `gh`, the Codex CLI, and the `creds` Keychain CLI. Sign in with `gh auth login` and `codex login`; `codex login status` must report ChatGPT. Cloudflare Workers and SQLite Durable Objects must be available in your account.
+
+Read [the security contract](SECURITY.md) before enabling automatic execution.
+
+## Install
+
+```bash
+npm ci
+npm run check
+npm test
+npm run setup -- /path/to/projects /path/to/config.json https://bridge.example.com
+node src/cli.ts install
+node src/cli.ts hooks
+```
+
+The Cloudflare Worker is named `event-bridge`. GitHub is a built-in event source. Additional webhook modules can be registered from the Mac using JSON policy, HMAC verification and input mapping without redeployment. Read [the module guide](docs/modules.md) for administration, local task registration and edge prerequisites. Existing private state paths and the launchd label retain their original names to preserve state.
+
+Before installing hooks, attach the dedicated hostname to the Worker and configure hostname-scoped edge rules. Generic ingress requires its separate custom header credential; module administration requires both transport and administration credentials. Public `workers.dev` and preview routes are disabled in the deployment configuration, and Worker CPU time is limited to 50 ms per invocation. Setup requires the dedicated HTTPS URL on first use and preserves it on subsequent runs.
+
+Setup discovers only direct Git checkouts owned by the authenticated GitHub account and resolves canonical GitHub names, excludes archived/disabled repositories, and deduplicates remotes. Inspect the generated repository allowlist **before** installing hooks. New repositories are not enrolled silently: rerun setup and hooks explicitly. Setup uses the existing `cloudflare/account/id` and `cloudflare/wrangler/api-key` Keychain entries; it creates bridge-specific webhook and client secrets without printing them. No local path, account identifier, token, event payload or execution report belongs in Git.
+
+Configuration lives in `~/.config/codex-github-bridge/config.json`. State and reports live in `~/Library/Application Support/codex-github-bridge/`. The launchd label is `com.codex.github-bridge`; it has no calendar or interval trigger. The Mac connects outward to the relay; it opens no externally reachable listener. The optional observation panel binds only to IPv4 loopback. The relay keeps pending events while the Mac is asleep.
+
+## Local observation panel
+
+Add the following property to the private configuration to opt in, then restart the daemon deliberately when no active work would be interrupted. The panel remains disabled when this property is absent. Setup preserves this choice.
+
+```json
+"observability": { "port": 17864 }
+```
+
+Open `http://127.0.0.1:17864` on the same Mac. The address must use `127.0.0.1`, including the configured port; other Host/Origin values are rejected. Port zero requests an ephemeral listener and is intended for local tests. The page has no retry, stop or execution controls. There is no CORS or external listener. Other processes on this Mac can read this local view; it is not an authentication boundary between local users.
+
+The view separates process activation, Worker transport, ownership observation and the two dispatchers. A connected socket does not prove that work is being dispatched. It shows last dispatcher checks, configuration validity and enabled task counts, local queue counts by state, first-receipt ages and unknown historical ages. It never queries the relay queue or polls GitHub. Forwarding and successful process exit are explicitly distinct from a validated correction.
+
+The server pushes coalesced SSE snapshots on changes. Every SSE reconnect receives a fresh snapshot, independent of any lost events. A local heartbeat runs only while viewers are connected; the browser labels lost or stale data and computes display ages locally. Slow clients are disconnected rather than buffered indefinitely; eight simultaneous SSE viewers are allowed.
+
+The page keeps at most 100 recent event groups since process start, with error/blocked/module/repository filters. Counts and latest receipt, ACK sent, ACK confirmed, result and safe error code also cover the current process lifetime. Durable queue counts survive restarts. Receipts and deduplication IDs are retained in SQLite independently of journal rotation. Old receipts without a known first-local-receipt time are not backfilled with invented times.
+
+Operational events go to `logs/events.jsonl` in the private state directory, rotated through `.1` and `.2`, each at most 10 MiB. Explicitly permitted fields are timestamp, first timestamp, safe code, severity, source, hashed correlation ID, configured repository name, module identifier, state and count. No payload, token, header, prompt, raw error, command output or CLI status object is included. Journal I/O failures appear as a fault flag. New Codex runs no longer capture raw stdout/stderr. Existing logs and final repair report artifacts are preserved for reconciliation and are outside this journal retention budget; neither is served by the panel.
+
+Read [the local observation validation notes](docs/observability.md) for the evidence and remaining activation limits.
+
+## Inspect and recover
+
+```bash
+node src/cli.ts status
+launchctl print gui/$(id -u)/com.codex.github-bridge
+node src/cli.ts retry /path/to/config.json EVENT_ID --reconciled
+launchctl kickstart -k gui/$(id -u)/com.codex.github-bridge
+```
+
+Queue states distinguish `queued`, `deferred`, `forwarding`, `forwarded`, `running`, `completed`, `ignored` and `blocked`. `forwarded` proves delivery to the owner, not that the defect has been fixed. `completed` means the agent finished; inspect its report for tests, draft PRs and unresolved findings. A restarted or uncertain external action becomes `blocked`; inspect GitHub and the local report before an explicit retry. Retrying does not erase remote effects or force a second push.
+
+Deferred work wakes on new session/repository events or a relay reconnect. Persisted deferrals are revalidated once when the dispatcher starts; repeated filesystem wakes do not poll GitHub. Identical state, detail and owner decisions neither change the job timestamp nor add journal entries. If ownership cannot be established, it stays deferred. Historical session logs that ended abruptly can require reconciliation. Known-unsent deliveries retry only after a control-socket lifecycle event, a new owner turn or a daemon restart. A lost response after steering quarantines the event instead of retrying. The optional absolute `controlSocket` setting selects an existing shared app-server socket; the default is under the configured `codexHome` at `app-server-control/app-server-control.sock`. This never starts another app-server, resumes an existing thread in a second process, or calls the desktop app tools private pipe. The lifecycle reader uses a bounded tail of all unarchived logs and recognizes configured checkout paths, tool working directories and GitHub origins of active worktrees. It is intentionally conservative; it cannot prove that arbitrary third-party applications are not editing a clean checkout.
+
+The initial implementation requires one bridge process per installation. Its SQLite process lock survives crashes correctly. For multiple Macs, create separate relay installations and coordinate ownership before enabling both.
+
+## Uninstall
+
+Disable or delete the bridge's webhook in each enrolled repository, then unload the LaunchAgent:
+
+```bash
+launchctl bootout gui/$(id -u) "$HOME/Library/LaunchAgents/com.codex.github-bridge.plist"
+```
+
+Preserve local reports until their outcomes are reconciled. Delete the Cloudflare Worker and bridge-specific Keychain entries only when you no longer need the installation. Never delete ChatGPT authentication or unrelated credentials.
+
+## Development
+
+`npm test` builds the Worker and runs unit tests plus a real local Workers/SQLite/WebSocket integration test. No tests require real credentials. Read [the validation record](docs/validation.md) for the delivered checks and explicit limitations.
+
+## References
+
+- Read [Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode) for subscription authentication and scripted execution.
+- Read [Codex App Server](https://learn.chatgpt.com/docs/app-server) for live thread steering.
+- Read [GitHub webhook events](https://docs.github.com/en/webhooks/webhook-events-and-payloads) and [Cloudflare WebSocket hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/) for transport behavior.
+
+Blocked or interrupted actions quarantine the entire repository, including later events, until an operator checks that no previous repair process or external action remains. Only then use the explicit retry command with `--reconciled`. Fork pull requests are outside unattended execution scope. A final ownership and dirty-state check runs after clone preparation and immediately before Codex launch.
+
+## Edge protection
+
+Apply WAF rules before Worker execution: allow only registered paths and methods, restrict GitHub ingress to the current `hooks` networks from GitHub's `/meta` API, and require the exact client bearer token on local control paths. The runtime still verifies HMAC signatures and client authentication. Use normalized header-map keys instead of comparing original header-name casing. Keep any rendered rule containing a credential private; rotate the rule and client credential together.
+
+Preserve other hostnames' existing security rules. Exempt only the relay hostname from a geographic restriction that would reject providers' webhooks. Do not enable browser challenges or zone-wide Bot Fight Mode for webhook traffic. Existing rate limits still apply and can affect provider bursts. Refresh provider network lists explicitly when needed; no periodic fetch is installed.
+
+During migration, prove the same Durable Object namespace remains attached before changing producers and the Mac URL. Disable every legacy public route only after signed provider deliveries and the authenticated WebSocket work through the protected hostname. A valid-looking signature header alone is never authentication.
+
+Development conventions are routed through `.conventions/index.md` after running `conventions-init`; generated local convention files remain outside Git. The repository includes TypeScript/Biome pre-commit checks, event-triggered CI and security scans, CodeQL, and dependency update configuration.

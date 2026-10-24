@@ -1,0 +1,37 @@
+{
+	"name": "event-bridge",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "Push GitHub review and CI events to a coordinated local Codex agent.",
+	"license": "MIT",
+	"engines": {
+		"node": ">=24.0.0"
+	},
+	"scripts": {
+		"check": "tsc --noEmit && tsc --noEmit -p tsconfig.relay.json && biome check src test relay",
+		"format": "biome check --write src test relay",
+		"test": "vitest run --testTimeout=10000",
+		"start": "node src/cli.ts start",
+		"relay:check": "wrangler deploy --dry-run --outdir .build/relay",
+		"relay:deploy": "wrangler deploy",
+		"pretest": "wrangler deploy --dry-run --outdir .build/relay",
+		"setup": "node src/setup.ts",
+		"typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.relay.json",
+		"lint": "biome check src test relay"
+	},
+	"dependencies": {
+		"ws": "latest",
+		"zod": "latest"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "latest",
+		"@cloudflare/workers-types": "latest",
+		"@types/node": "latest",
+		"@types/ws": "latest",
+		"miniflare": "^5.20261019.2-beta",
+		"typescript": "latest",
+		"vitest": "^5.0.5",
+		"wrangler": "latest"
+	}
+}
